@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 httpx
 python-dotenv
+python-multipart
 pandas
 numpy
 prophet
