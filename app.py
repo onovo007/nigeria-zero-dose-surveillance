@@ -1761,7 +1761,7 @@ def builtin_states(zone: Optional[str] = None, tier: Optional[str] = None,
     if tier:
         data = [d for d in data
                 if tier.lower() in (d.get("priority_tier") or "").lower()]
-    reverse = sort_by in ["risk_index","zd_pred_2026_mean","zd_count_2026","Gi_z_2026"]
+    reverse = sort_by in ["risk_index","zd_pred_2026_mean","zd_count_2026","gi_z_2026"]
     data.sort(key=lambda x: x.get(sort_by) or 0, reverse=reverse)
     return {"count": len(data), "states": data}
 
@@ -1776,7 +1776,7 @@ def builtin_summary():
         tiers[t] = tiers.get(t, 0) + 1
         z = d.get("zone", "")
         zones[z] = zones.get(z, 0) + (d.get("zd_count_2026") or 0)
-        if "Hot Spot" in (d.get("hotspot_2026") or ""):
+        if "Hot Spot" in (d.get("gi_class_2026") or ""):
             hotspot.append(d["state"])
     return {
         "national_zd_rate_2026":     round(mean_r, 1),
@@ -1795,11 +1795,11 @@ def get_hotspots(year: int = 2026):
         raise HTTPException(400, "year must be 2026, 2027, or 2028.")
     results = []
     for d in STATE_DATA:
-        cls = d.get("hotspot_2026") or "Not Significant"
+        cls = d.get("gi_class_2026") or "Not Significant"
         results.append({
             "state":        d["state"],
             "zone":         d["zone"],
-            "gi_z":         round(d.get("Gi_z_2026") or 0, 3),
+            "gi_z":         round(d.get("gi_z_2026") or 0, 3),
             "gi_class":     cls,
             "is_hotspot":   "Hot Spot" in cls,
             "zd_pred_mean": d.get("zd_pred_2026_mean"),
@@ -1860,8 +1860,8 @@ async def interpret(req: InterpretRequest):
             "Predicted 2027: " + str(s.get("zd_pred_2027_mean")) +
             "% | Predicted 2028: " + str(s.get("zd_pred_2028_mean")) + "%\n"
             "Estimated zero-dose children (2026): " + str(s.get("zd_count_2026")) + "\n"
-            "Getis-Ord Gi* status: " + str(s.get("hotspot_2026")) +
-            " (z = " + str(s.get("Gi_z_2026")) + ")\n"
+            "Getis-Ord Gi* status: " + str(s.get("gi_class_2026")) +
+            " (z = " + str(s.get("gi_z_2026")) + ")\n"
             "Recommended action: " + tier_action + "\n"
         )
     elif req.context:
