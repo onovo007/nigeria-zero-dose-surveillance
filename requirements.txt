@@ -10,6 +10,7 @@ python-multipart
 pandas
 numpy
 scipy
+pyarrow  # parquet engine for disk session persistence (survives Render instance recycle)
 
 # Domain 1 & 2 — Forecasting & Dropout drivers
 prophet
