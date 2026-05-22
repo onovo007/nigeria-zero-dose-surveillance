@@ -424,6 +424,26 @@ def get_session(session_id: str) -> Dict[str, Any]:
     return sessions[session_id]
 
 
+def ensure_session(session_id: str) -> Dict[str, Any]:
+    """Get the session if it exists; otherwise create it with the given id.
+    Used on /upload so a server cold-start or instance recycle (common on free-tier
+    Render) does not strand the user with a 404 mid-workflow."""
+    if not session_id or len(session_id) < 6:
+        raise HTTPException(400, "Invalid session_id.")
+    if session_id not in sessions:
+        reap_expired()
+        sessions[session_id] = {
+            "session_id":  session_id,
+            "created_at":  time.time(),
+            "touched_at":  time.time(),
+            "data":        {},
+            "auto_created": True,
+        }
+    else:
+        sessions[session_id]["touched_at"] = time.time()
+    return sessions[session_id]
+
+
 def parse_csv(content: bytes) -> "pd.DataFrame":
     """Parse a CSV bytes payload tolerating UTF-8 BOMs and odd encodings."""
     for enc in ("utf-8-sig", "utf-8", "latin-1"):
@@ -604,7 +624,9 @@ async def upload_to_session(session_id: str, role: str, file: UploadFile = File(
     if role not in VALID_ROLES:
         raise HTTPException(400, f"Invalid role '{role}'. Valid: {list(VALID_ROLES)}")
 
-    sess = get_session(session_id)
+    # ensure_session (not get_session) so a server cold-start mid-workflow
+    # auto-creates the session instead of returning 404.
+    sess = ensure_session(session_id)
     content = await file.read()
     df = parse_csv(content)
 
@@ -641,7 +663,7 @@ def preprocess_session(session_id: str, cfg: PreprocessConfig):
     this lazily if not called explicitly, but exposing it lets the frontend
     show a data-quality panel before the user clicks Run.
     """
-    sess = get_session(session_id)
+    sess = ensure_session(session_id)
     if not sess.get("data"):
         raise HTTPException(400, "No datasets uploaded yet.")
     if not (DATA_READY and SKLEARN_READY):
