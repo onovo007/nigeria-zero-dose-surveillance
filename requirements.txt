@@ -1,10 +1,33 @@
+# Core API
 fastapi
 uvicorn[standard]
 httpx
 python-dotenv
+pydantic
 python-multipart
+
+# Data
 pandas
 numpy
+scipy
+
+# Domain 1 & 2 — Forecasting & Dropout drivers
 prophet
 scikit-learn
-scipy
+
+# Domain 5 — Bayesian Hierarchical Beta Regression
+pymc>=5.10
+arviz>=0.17
+
+# Domain 5 — Spatial analysis (Getis-Ord Gi*)
+# NOTE: geopandas/fiona/shapely require GDAL+GEOS+PROJ. On Render this
+# typically works via pre-built wheels. If wheels fail, see render.yaml
+# for the system-deps build script.
+geopandas>=0.14
+pyogrio
+libpysal>=4.9
+esda>=2.5
+
+# Premium fact sheet generation (PDF + static maps/charts)
+matplotlib>=3.7
+reportlab>=4.0
