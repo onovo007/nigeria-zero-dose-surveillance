@@ -837,6 +837,7 @@ def _new_job(kind: str, session_id: str) -> str:
         "error":      None,
         "created_at": time.time(),
     }
+    _persist_job(jid)
     return jid
 
 
@@ -844,18 +845,63 @@ def _set_progress(jid: str, pct: int, msg: str):
     if jid in jobs:
         jobs[jid]["progress"] = pct
         jobs[jid]["message"]  = msg
+        _persist_job(jid)
 
 
 def _job_error(jid: str, exc: Exception):
-    jobs[jid]["status"] = "error"
-    jobs[jid]["error"]  = f"{type(exc).__name__}: {exc}"
-    jobs[jid]["progress"] = 100
+    if jid in jobs:
+        jobs[jid]["status"] = "error"
+        jobs[jid]["error"]  = f"{type(exc).__name__}: {exc}"
+        jobs[jid]["progress"] = 100
+        _persist_job(jid)
+
+
+# ─── Job disk persistence ───
+# Jobs live in an in-memory dict that gets wiped when Render recycles the instance.
+# A poll a few seconds after submit can hit a fresh instance with no record of
+# the job → "Job not found or expired". We persist a JSON snapshot on every
+# state transition so polling can always restore the latest state.
+JOB_DISK_DIR = "/tmp/zerodose_jobs"
+os.makedirs(JOB_DISK_DIR, exist_ok=True)
+
+
+def _job_path(jid: str) -> str:
+    return os.path.join(JOB_DISK_DIR, f"{jid}.json")
+
+
+def _persist_job(jid: str):
+    if jid not in jobs:
+        return
+    try:
+        # Result can be large (Domain 5 ≈ several MB). Use compact separators
+        # and let json handle nested dicts/lists. Numpy types should already
+        # be _json_safe-ified by the result builders.
+        with open(_job_path(jid), "w") as f:
+            json.dump(jobs[jid], f, default=str)
+    except Exception as e:
+        print(f"[persist_job] {jid}: {e}")
+
+
+def _try_restore_job(jid: str) -> bool:
+    p = _job_path(jid)
+    if not os.path.exists(p):
+        return False
+    try:
+        with open(p) as f:
+            jobs[jid] = json.load(f)
+        return True
+    except Exception as e:
+        print(f"[restore_job] {jid}: {e}")
+        return False
 
 
 @app.get("/job/{job_id}")
 def get_job(job_id: str):
     if job_id not in jobs:
-        raise HTTPException(404, "Job not found or expired.")
+        # Try to restore from disk before failing — handles instance recycle
+        # between job submit and the very next poll
+        if not _try_restore_job(job_id):
+            raise HTTPException(404, "Job not found or expired.")
     return jobs[job_id]
 
 
@@ -1034,6 +1080,7 @@ def _run_domain1(jid: str, session_id: str, cfg: Domain1Config):
         jobs[jid]["status"] = "complete"
         jobs[jid]["progress"] = 100
         jobs[jid]["result"]  = result
+        _persist_job(jid)
 
     except Exception as e:
         _job_error(jid, e)
@@ -1046,6 +1093,7 @@ def run_domain1(session_id: str, cfg: Domain1Config, background_tasks: Backgroun
     get_session(session_id)
     jid = _new_job("domain1", session_id)
     jobs[jid]["status"] = "running"
+    _persist_job(jid)
     background_tasks.add_task(_run_domain1, jid, session_id, cfg)
     return {"job_id": jid, "status": "running"}
 
@@ -1241,6 +1289,7 @@ def _run_domain2(jid: str, session_id: str, cfg: Domain2Config):
         jobs[jid]["status"] = "complete"
         jobs[jid]["progress"] = 100
         jobs[jid]["result"]  = result
+        _persist_job(jid)
 
     except Exception as e:
         _job_error(jid, e)
@@ -1253,6 +1302,7 @@ def run_domain2(session_id: str, cfg: Domain2Config, background_tasks: Backgroun
     get_session(session_id)
     jid = _new_job("domain2", session_id)
     jobs[jid]["status"] = "running"
+    _persist_job(jid)
     background_tasks.add_task(_run_domain2, jid, session_id, cfg)
     return {"job_id": jid, "status": "running"}
 
@@ -1746,6 +1796,7 @@ def _run_domain5(jid: str, session_id: str, cfg: Domain5Config):
         jobs[jid]["status"]   = "complete"
         jobs[jid]["progress"] = 100
         jobs[jid]["result"]   = result
+        _persist_job(jid)
 
     except Exception as e:
         _job_error(jid, e)
@@ -1758,6 +1809,7 @@ def run_domain5(session_id: str, cfg: Domain5Config, background_tasks: Backgroun
     get_session(session_id)
     jid = _new_job("domain5", session_id)
     jobs[jid]["status"] = "running"
+    _persist_job(jid)
     # Run in a dedicated thread (MCMC is CPU-bound + long-running)
     t = threading.Thread(target=_run_domain5, args=(jid, session_id, cfg), daemon=True)
     t.start()
