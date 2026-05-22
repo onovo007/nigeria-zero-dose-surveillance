@@ -412,14 +412,26 @@ def reap_expired():
     for sid in list(sessions.keys()):
         if cutoff - sessions[sid].get("touched_at", 0) > SESSION_TTL_SECONDS:
             sessions.pop(sid, None)
+            _purge_session_disk(sid)
     for jid in list(jobs.keys()):
         if cutoff - jobs[jid].get("created_at", 0) > JOB_TTL_SECONDS:
             jobs.pop(jid, None)
+    # Also reap orphan disk directories older than TTL
+    try:
+        if os.path.isdir(SESSION_DISK_DIR):
+            for name in os.listdir(SESSION_DISK_DIR):
+                p = os.path.join(SESSION_DISK_DIR, name)
+                if os.path.isdir(p) and (cutoff - os.path.getmtime(p)) > SESSION_TTL_SECONDS:
+                    _purge_session_disk(name)
+    except Exception:
+        pass
 
 
 def get_session(session_id: str) -> Dict[str, Any]:
     if session_id not in sessions:
-        raise HTTPException(404, "Session not found or expired. Create a new session and re-upload your data.")
+        # Try to restore from disk before failing
+        if not _try_restore_session(session_id):
+            raise HTTPException(404, "Session not found or expired. Create a new session and re-upload your data.")
     sessions[session_id]["touched_at"] = time.time()
     return sessions[session_id]
 
@@ -427,9 +439,14 @@ def get_session(session_id: str) -> Dict[str, Any]:
 def ensure_session(session_id: str) -> Dict[str, Any]:
     """Get the session if it exists; otherwise create it with the given id.
     Used on /upload so a server cold-start or instance recycle (common on free-tier
-    Render) does not strand the user with a 404 mid-workflow."""
+    Render) does not strand the user with a 404 mid-workflow.
+
+    Will attempt to restore previously persisted session data from disk first."""
     if not session_id or len(session_id) < 6:
         raise HTTPException(400, "Invalid session_id.")
+    if session_id not in sessions:
+        # Try to restore from disk before creating empty
+        _try_restore_session(session_id)
     if session_id not in sessions:
         reap_expired()
         sessions[session_id] = {
@@ -442,6 +459,103 @@ def ensure_session(session_id: str) -> Dict[str, Any]:
     else:
         sessions[session_id]["touched_at"] = time.time()
     return sessions[session_id]
+
+
+# ─── Session disk persistence ───
+# Uploads survive Render instance recycling by saving parsed DataFrames to
+# /tmp/sessions/{sid}/{role}.parquet. On re-access, we hydrate from disk
+# if the in-memory copy is missing.
+SESSION_DISK_DIR = "/tmp/zerodose_sessions"
+os.makedirs(SESSION_DISK_DIR, exist_ok=True)
+
+
+def _session_dir(session_id: str) -> str:
+    d = os.path.join(SESSION_DISK_DIR, session_id)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _persist_role(session_id: str, role: str, df: "pd.DataFrame", filename: str):
+    """Write the parsed DataFrame for a role to disk so we can re-hydrate after
+    an instance recycle. Uses Parquet for type fidelity; falls back to CSV if
+    pyarrow/fastparquet aren't available."""
+    try:
+        d = _session_dir(session_id)
+        path = os.path.join(d, f"{role}.parquet")
+        try:
+            df.to_parquet(path, index=False)
+        except Exception:
+            # Fallback to CSV if Parquet engine missing
+            path = os.path.join(d, f"{role}.csv")
+            df.to_csv(path, index=False)
+        # Also write a metadata sidecar with the original filename
+        meta_path = os.path.join(d, f"{role}.meta.json")
+        with open(meta_path, "w") as f:
+            json.dump({"filename": filename, "saved_at": time.time(), "rows": len(df),
+                       "columns": df.columns.tolist()}, f)
+    except Exception as e:
+        print(f"[persist] Failed to save {session_id}/{role}: {e}")
+
+
+def _try_restore_session(session_id: str) -> bool:
+    """If we find persisted data on disk for this session_id, hydrate the in-memory
+    session dict from it. Returns True if any data was restored."""
+    d = os.path.join(SESSION_DISK_DIR, session_id)
+    if not os.path.isdir(d):
+        return False
+    try:
+        sessions[session_id] = {
+            "session_id":   session_id,
+            "created_at":   time.time(),
+            "touched_at":   time.time(),
+            "data":         {},
+            "auto_created": True,
+            "restored":     True,
+        }
+        restored = 0
+        for role in VALID_ROLES.keys():
+            for ext in ("parquet", "csv"):
+                path = os.path.join(d, f"{role}.{ext}")
+                if not os.path.exists(path): continue
+                try:
+                    df = pd.read_parquet(path) if ext == "parquet" else pd.read_csv(path)
+                except Exception as e:
+                    print(f"[restore] Failed to read {path}: {e}")
+                    continue
+                meta_path = os.path.join(d, f"{role}.meta.json")
+                meta = {"filename": f"{role}.{ext}", "rows": len(df)}
+                if os.path.exists(meta_path):
+                    try:
+                        with open(meta_path) as f: meta.update(json.load(f))
+                    except Exception:
+                        pass
+                sessions[session_id]["data"][role] = {
+                    "df":       df,
+                    "filename": meta.get("filename", f"{role}.{ext}"),
+                    "rows":     len(df),
+                    "columns":  df.columns.tolist(),
+                }
+                restored += 1
+                break
+        if restored:
+            print(f"[restore] Restored session {session_id}: {restored} role(s) from disk")
+            return True
+        # No data restored — remove the placeholder so caller can decide
+        del sessions[session_id]
+        return False
+    except Exception as e:
+        print(f"[restore] Failed for {session_id}: {e}")
+        sessions.pop(session_id, None)
+        return False
+
+
+def _purge_session_disk(session_id: str):
+    """Best-effort cleanup of persisted session files (called on explicit delete)."""
+    import shutil
+    d = os.path.join(SESSION_DISK_DIR, session_id)
+    if os.path.isdir(d):
+        try: shutil.rmtree(d)
+        except Exception as e: print(f"[purge] {e}")
 
 
 def parse_csv(content: bytes) -> "pd.DataFrame":
@@ -636,6 +750,9 @@ async def upload_to_session(session_id: str, role: str, file: UploadFile = File(
         "rows":     len(df),
         "columns":  df.columns.tolist(),
     }
+    # Persist to disk so the data survives a Render instance recycle between
+    # upload and the next Run click. This is the critical reliability fix.
+    _persist_role(session_id, role, df, file.filename)
     # Bust the cached cleaned data so the next analysis re-runs preprocessing
     sess.pop("data_clean",    None)
     sess.pop("clean_reports", None)
@@ -696,8 +813,10 @@ def session_info(session_id: str):
 
 @app.delete("/session/{session_id}")
 def delete_session(session_id: str):
-    if session_id in sessions:
-        sessions.pop(session_id)
+    found = session_id in sessions
+    sessions.pop(session_id, None)
+    _purge_session_disk(session_id)   # cleanup persisted parquet/csv
+    if found:
         return {"deleted": session_id}
     raise HTTPException(404, "Session not found.")
 
