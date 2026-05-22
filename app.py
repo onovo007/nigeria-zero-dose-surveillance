@@ -1090,7 +1090,16 @@ def _run_domain1(jid: str, session_id: str, cfg: Domain1Config):
 def run_domain1(session_id: str, cfg: Domain1Config, background_tasks: BackgroundTasks):
     if not (DATA_READY and PROPHET_READY):
         raise HTTPException(500, "Prophet/pandas not installed on the server.")
-    get_session(session_id)
+    # ensure_session (not get_session) — auto-creates if missing, restores from
+    # disk if possible. This handles the case where the Render instance was
+    # recycled between upload and run, and the in-memory session was wiped.
+    sess = ensure_session(session_id)
+    if "dhis2" not in sess.get("data", {}):
+        raise HTTPException(
+            400,
+            "DHIS2 data not available for this session. The server may have restarted "
+            "since you last uploaded. Please re-upload your DHIS2 CSV in Step 1 and try again."
+        )
     jid = _new_job("domain1", session_id)
     jobs[jid]["status"] = "running"
     _persist_job(jid)
@@ -1299,7 +1308,13 @@ def _run_domain2(jid: str, session_id: str, cfg: Domain2Config):
 def run_domain2(session_id: str, cfg: Domain2Config, background_tasks: BackgroundTasks):
     if not (DATA_READY and PROPHET_READY):
         raise HTTPException(500, "Prophet/pandas not installed on the server.")
-    get_session(session_id)
+    sess = ensure_session(session_id)
+    if "dhis2" not in sess.get("data", {}):
+        raise HTTPException(
+            400,
+            "DHIS2 data not available for this session. The server may have restarted "
+            "since you last uploaded. Please re-upload your DHIS2 CSV in Step 1 and try again."
+        )
     jid = _new_job("domain2", session_id)
     jobs[jid]["status"] = "running"
     _persist_job(jid)
@@ -1806,7 +1821,13 @@ def _run_domain5(jid: str, session_id: str, cfg: Domain5Config):
 def run_domain5(session_id: str, cfg: Domain5Config, background_tasks: BackgroundTasks):
     if not (DATA_READY and PYMC_READY):
         raise HTTPException(500, "PyMC/pandas not installed on the server.")
-    get_session(session_id)
+    sess = ensure_session(session_id)
+    if "ndhs_long" not in sess.get("data", {}):
+        raise HTTPException(
+            400,
+            "NDHS panel data not available for this session. The server may have restarted "
+            "since you last uploaded. Please re-upload your NDHS CSV in Step 1 and try again."
+        )
     jid = _new_job("domain5", session_id)
     jobs[jid]["status"] = "running"
     _persist_job(jid)
